@@ -1,6 +1,7 @@
+streamlit
+pandas
+numpy
 bcrypt
 python-dotenv
-reportlab
-Pillow
-sentence-transformers
-scikit-learn
+langchain-google-genai
+langchain-core
