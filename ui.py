@@ -36,7 +36,12 @@ from utils import (
     PRIMARY_BLUE, SECONDARY_BLUE, NAV_BAR_BG, MOCK_SPECIALTIES,
     logout, set_page_style
 )
-
+st.set_page_config(
+    page_title="E-Healthcare System",
+    page_icon="🩺",               # stethoscope — clean & professional
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 load_dotenv()
 
 
@@ -864,38 +869,44 @@ def show_doctor_dashboard():
 
 
 def show_generate_prescription():
-    rid = st.session_state.get('active_chat_request')
+    import streamlit as st
+
+    # ------------------ CHECK ACTIVE CHAT ------------------
+    rid = st.session_state.get("active_chat_request")
     if not rid:
         st.warning("No active chat selected. Please go to Live Chat first.")
         return
 
-    req = next((r for r in get_chat_requests() if r['request_id'] == rid), None)
+    req = next((r for r in get_chat_requests() if r["request_id"] == rid), None)
     if not req:
         st.error("Chat request not found.")
         return
 
-    patient_name = req['patient_name']
-    patient_email = req['patient_email']
+    patient_name = req["patient_name"]
+    patient_email = req["patient_email"]
 
-    st.subheader(f"Generate Prescription for {patient_name} (Chat #{rid})")
+    st.subheader(f"📝 Generate Prescription for {patient_name} (Chat #{rid})")
 
-    with st.form("prescription_form"):
-        st.info("Add medicines one by one")
+    # ------------------ INIT SESSION STATE ------------------
+    if "prescription_meds" not in st.session_state:
+        st.session_state.prescription_meds = []
 
-        if 'prescription_meds' not in st.session_state:
-            st.session_state.prescription_meds = []
+    if "advice_text" not in st.session_state:
+        st.session_state.advice_text = ""
 
-        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
-        with col1:
-            med_name = st.text_input("Medicine Name", key="med_name_input")
-        with col2:
-            dosage = st.text_input("Dosage (e.g., 1 tab twice daily)", key="dosage_input")
-        with col3:
-            duration = st.text_input("Duration (e.g., 5 days)", key="duration_input")
-        with col4:
-            add_med = st.form_submit_button("Add")
+    # ================== ADD MEDICINES SECTION ==================
+    st.markdown("### 💊 Add Medicines")
 
-        if add_med:
+    col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+
+    with col1:
+        med_name = st.text_input("Medicine Name", key="med_name_input")
+    with col2:
+        dosage = st.text_input("Dosage (e.g., 1 tab twice daily)", key="dosage_input")
+    with col3:
+        duration = st.text_input("Duration (e.g., 5 days)", key="duration_input")
+    with col4:
+        if st.button("➕ Add"):
             if med_name.strip():
                 st.session_state.prescription_meds.append({
                     "name": med_name.strip(),
@@ -903,42 +914,76 @@ def show_generate_prescription():
                     "duration": duration.strip()
                 })
                 st.success(f"Added: {med_name}")
+                st.session_state.med_name_input = ""
+                st.session_state.dosage_input = ""
+                st.session_state.duration_input = ""
                 st.rerun()
             else:
                 st.error("Medicine name is required.")
 
-        if st.session_state.prescription_meds:
-            st.markdown("### Current Medicines")
-            for i, med in enumerate(st.session_state.prescription_meds):
-                st.markdown(f"**{i + 1}.** {med['name']} — {med['dosage']} — {med['duration']}")
-                if st.button("Remove", key=f"remove_med_{i}"):
+    # ================== SHOW MEDICINES ==================
+    if st.session_state.prescription_meds:
+        st.markdown("### 📋 Current Medicines")
+        for i, med in enumerate(st.session_state.prescription_meds):
+            col_a, col_b = st.columns([5, 1])
+            with col_a:
+                st.markdown(
+                    f"**{i + 1}. {med['name']}** — {med['dosage']} — {med['duration']}"
+                )
+            with col_b:
+                if st.button("❌ Remove", key=f"remove_med_{i}"):
                     st.session_state.prescription_meds.pop(i)
                     st.rerun()
 
-        advice = st.text_area("Additional Advice / Notes", height=100)
+    st.divider()
 
-        col_save, col_clear = st.columns([1, 1])
-        with col_save:
-            save = st.form_submit_button("Save & Send Prescription", type="primary")
-        with col_clear:
-            clear = st.form_submit_button("Clear All")
+    # ================== FINAL PRESCRIPTION FORM ==================
+    with st.form("final_prescription_form"):
+        st.markdown("### 🧾 Prescription Notes")
 
+        advice = st.text_area(
+            "Additional Advice / Notes",
+            value=st.session_state.advice_text,
+            height=120,
+            placeholder="e.g., Drink plenty of water, take medicine after meals..."
+        )
+
+        col_save, col_clear = st.columns(2)
+        save = col_save.form_submit_button(
+            "✅ Save & Send Prescription",
+            type="primary"
+        )
+        clear = col_clear.form_submit_button("🧹 Clear All")
+
+        # ---------- SAVE ----------
         if save:
             if not st.session_state.prescription_meds:
-                st.error("Add at least one medicine.")
+                st.error("Please add at least one medicine.")
             else:
+                st.session_state.advice_text = advice
+
                 add_prescription(
                     request_id=rid,
                     patient_email=patient_email,
-                    doctor_email=st.session_state.user_profile['email'],
-                    doctor_name=st.session_state.user_profile['name'],
+                    doctor_email=st.session_state.user_profile["email"],
+                    doctor_name=st.session_state.user_profile["name"],
                     patient_name=patient_name,
                     medicines=st.session_state.prescription_meds,
                     advice=advice.strip()
                 )
-                st.success("Prescription saved and sent to patient!")
+
+                st.success("🎉 Prescription saved and sent to patient!")
+
+                # Clear everything after save
                 st.session_state.prescription_meds = []
+                st.session_state.advice_text = ""
                 st.rerun()
+
+        # ---------- CLEAR ----------
+        if clear:
+            st.session_state.prescription_meds = []
+            st.session_state.advice_text = ""
+            st.rerun()
 
         if clear:
             st.session_state.prescription_meds = []
