@@ -1,0 +1,6 @@
+bcrypt
+python-dotenv
+reportlab
+Pillow
+sentence-transformers
+scikit-learn
