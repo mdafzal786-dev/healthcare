@@ -38,6 +38,30 @@ def get_doctors_cursor():  return get_doctors_conn().cursor()
 def commit_patients(): get_patients_conn().commit()
 def commit_doctors():  get_doctors_conn().commit()
 
+# ────────────────────────────────────────────────────────────────
+# Retry decorator – fixes "database is locked"
+# ────────────────────────────────────────────────────────────────
+def with_retry(max_attempts=6, delay=1.0):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except sqlite3.OperationalError as e:
+                    if "database is locked" in str(e).lower() and attempt < max_attempts - 1:
+                        print(f"[DB RETRY] Locked – attempt {attempt+1}/{max_attempts} – wait {delay}s")
+                        time.sleep(delay)
+                        last_exc = e
+                        continue
+                    raise
+                except Exception as e:
+                    last_exc = e
+                    raise
+            raise Exception(f"Failed after {max_attempts} retries. Last error: {last_exc}")
+        return wrapper
+    return decorator
+
 def init_databases():
     pc = get_patients_cursor()
     pc.execute('''
@@ -126,7 +150,6 @@ def init_databases():
         )
     ''')
 
-    # File attachments table
     dc.execute('''
         CREATE TABLE IF NOT EXISTS chat_attachments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,7 +162,6 @@ def init_databases():
         )
     ''')
 
-    # Prescriptions table
     dc.execute('''
         CREATE TABLE IF NOT EXISTS prescriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,15 +193,23 @@ def register_patient(email, password, name, mobile):
     c = get_patients_cursor()
     try:
         c.execute('INSERT INTO patients (email, password, name, mobile, patient_id) VALUES (?, ?, ?, ?, ?)',
-                  (email, hash_password(password), name, mobile, pid))
+                  (email.strip().lower(), hash_password(password), name.strip(), mobile.strip() or None, pid))
         commit_patients()
-        return True
+        print(f"[REGISTER] SUCCESS → {email}")
+        return True, "Registration successful"
     except sqlite3.IntegrityError:
-        return False
+        print(f"[REGISTER] Duplicate email: {email}")
+        return False, "This email is already registered. Please log in."
+    except sqlite3.OperationalError as e:
+        print(f"[REGISTER] Database error: {e}")
+        return False, f"Database error: {str(e)}"
+    except Exception as e:
+        print(f"[REGISTER] Unexpected error: {e}")
+        return False, f"Unexpected error: {str(e)}"
 
 def get_patient(email):
     c = get_patients_cursor()
-    c.execute('SELECT * FROM patients WHERE email = ?', (email,))
+    c.execute('SELECT * FROM patients WHERE email = ?', (email.strip().lower(),))
     row = c.fetchone()
     if row:
         return {"email": row[0], "password": row[1], "name": row[2], "mobile": row[3], "patient_id": row[4], "role": "patient"}
@@ -191,7 +221,7 @@ def add_doctor(email, password, name, mobile, specialty, doc_id, qualification):
         c.execute('''
             INSERT INTO doctors (email, password, name, mobile, specialty, doc_id, qualification)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (email, hash_password(password), name, mobile, specialty, doc_id, qualification))
+        ''', (email.strip().lower(), hash_password(password), name.strip(), mobile.strip() or None, specialty, doc_id.strip(), qualification.strip()))
         commit_doctors()
         return True
     except sqlite3.IntegrityError:
@@ -199,7 +229,7 @@ def add_doctor(email, password, name, mobile, specialty, doc_id, qualification):
 
 def get_doctor(email):
     c = get_doctors_cursor()
-    c.execute('SELECT * FROM doctors WHERE email = ?', (email,))
+    c.execute('SELECT * FROM doctors WHERE email = ?', (email.strip().lower(),))
     row = c.fetchone()
     if row:
         return {
@@ -215,10 +245,6 @@ def get_all_doctors():
     return [{"email":r[0],"name":r[1],"mobile":r[2],"specialty":r[3],"doc_id":r[4],"qualification":r[5],"role":"doctor"} for r in c.fetchall()]
 
 def get_all_patients():
-    """
-    Retrieves all registered patients from the patients database.
-    Returns a list of dictionaries with patient details.
-    """
     c = get_patients_cursor()
     c.execute('SELECT email, name, mobile, patient_id FROM patients ORDER BY name')
     rows = c.fetchall()
@@ -235,12 +261,12 @@ def get_all_patients():
 def save_otp(email, otp):
     c = get_patients_cursor()
     now = time.strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('INSERT OR REPLACE INTO otp_verifications (email, otp, created_at, attempts) VALUES (?, ?, ?, 0)', (email, otp, now))
+    c.execute('INSERT OR REPLACE INTO otp_verifications (email, otp, created_at, attempts) VALUES (?, ?, ?, 0)', (email.strip().lower(), otp, now))
     commit_patients()
 
 def get_otp(email):
     c = get_patients_cursor()
-    c.execute('SELECT otp, created_at, attempts FROM otp_verifications WHERE email = ?', (email,))
+    c.execute('SELECT otp, created_at, attempts FROM otp_verifications WHERE email = ?', (email.strip().lower(),))
     row = c.fetchone()
     if row:
         otp, created_at, attempts = row
@@ -252,12 +278,12 @@ def get_otp(email):
 
 def increment_otp_attempts(email):
     c = get_patients_cursor()
-    c.execute('UPDATE otp_verifications SET attempts = attempts + 1 WHERE email = ?', (email,))
+    c.execute('UPDATE otp_verifications SET attempts = attempts + 1 WHERE email = ?', (email.strip().lower(),))
     commit_patients()
 
 def delete_otp(email):
     c = get_patients_cursor()
-    c.execute('DELETE FROM otp_verifications WHERE email = ?', (email,))
+    c.execute('DELETE FROM otp_verifications WHERE email = ?', (email.strip().lower(),))
     commit_patients()
 
 def send_verification_email(email, otp):
@@ -305,20 +331,11 @@ def add_chat_request(req):
         req['status'], req['patient_name'], req['patient_id'], req['flag'], req['timestamp']
     ))
     commit_doctors()
-    add_notification(req['doctor_email'], f"New request from {req['patient_name']} (ID: {req['request_id']})", req['request_id'])
 
 def update_chat_request_status(rid, status):
     c = get_doctors_cursor()
-    c.execute('SELECT patient_email, doctor_name FROM chat_requests WHERE request_id = ?', (rid,))
-    res = c.fetchone()
-    if res:
-        p_email, d_name = res
-        c.execute('UPDATE chat_requests SET status = ? WHERE request_id = ?', (status, rid))
-        commit_doctors()
-        if status == "Accepted":
-            add_notification(p_email, f"Dr. {d_name} accepted (ID: {rid})", rid)
-        elif status == "Closed":
-            add_notification(p_email, f"Chat closed (ID: {rid})", rid)
+    c.execute('UPDATE chat_requests SET status = ? WHERE request_id = ?', (status, rid))
+    commit_doctors()
 
 def get_chat_messages(rid):
     c = get_doctors_cursor()
@@ -331,12 +348,7 @@ def add_chat_message(rid, sender, role, text):
     c.execute('INSERT INTO chat_messages (request_id, sender, role, text, timestamp) VALUES (?,?,?,?,?)',
               (rid, sender, role, text, ts))
     commit_doctors()
-    c.execute('SELECT patient_email, doctor_email FROM chat_requests WHERE request_id = ?', (rid,))
-    p, d = c.fetchone()
-    recipient = d if role == "patient" else p
-    add_notification(recipient, f"New message from {sender}", rid)
 
-# File attachment functions
 def add_chat_attachment(request_id, filename, file_path, sender, role):
     ts = time.strftime("%H:%M")
     c = get_doctors_cursor()
@@ -346,11 +358,6 @@ def add_chat_attachment(request_id, filename, file_path, sender, role):
         VALUES (?,?,?,?,?,?)
     ''', (request_id, filename, file_path, sender, role, ts))
     commit_doctors()
-
-    c.execute('SELECT patient_email, doctor_email FROM chat_requests WHERE request_id = ?', (request_id,))
-    p, d = c.fetchone()
-    recipient = d if role == "patient" else p
-    add_notification(recipient, f"New file from {sender}: {filename}", request_id)
 
 def get_chat_attachments(request_id):
     c = get_doctors_cursor()
@@ -362,7 +369,6 @@ def get_chat_attachments(request_id):
     ''', (request_id,))
     return [{"sender":r[0], "role":r[1], "filename":r[2], "file_path":r[3], "timestamp":r[4]} for r in c.fetchall()]
 
-# Prescription functions
 def add_prescription(request_id, patient_email, doctor_email, doctor_name, patient_name, medicines, advice=""):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     medicines_json = json.dumps(medicines)
@@ -373,8 +379,6 @@ def add_prescription(request_id, patient_email, doctor_email, doctor_name, patie
         VALUES (?,?,?,?,?,?,?,?)
     ''', (request_id, patient_email, doctor_email, doctor_name, patient_name, medicines_json, advice, ts))
     commit_doctors()
-
-    add_notification(patient_email, f"New prescription from Dr. {doctor_name} (Chat #{request_id})", request_id)
 
 def get_prescriptions_for_patient(patient_email):
     c = get_doctors_cursor()
@@ -443,3 +447,5 @@ def mark_notifications_read_by_request(rid, email):
     c = get_doctors_cursor()
     c.execute('UPDATE notifications SET status = "read" WHERE request_id = ? AND user_email = ?', (rid, email))
     commit_doctors()
+
+print("[DB] Loaded – with_retry added to fix NameError")
